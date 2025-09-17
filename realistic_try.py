@@ -38,15 +38,14 @@ vol = modal.Volume.from_name("hf-hub-cache", create_if_missing=True)
 # Function to download models & LoRAs from Hugging Face repo or direct URLs
 def download_models():
     from huggingface_hub import hf_hub_download
-
+    
     # Paths inside the container for ComfyUI models
     base_dir = "/root/comfy/ComfyUI/models"
     diffusion_dir = os.path.join(base_dir, "diffusion_models")
     lora_dir = os.path.join(base_dir, "loras")
-
     os.makedirs(diffusion_dir, exist_ok=True)
     os.makedirs(lora_dir, exist_ok=True)
-
+    
     # Flux base model download (example from CivitAI, replace with actual link if needed)
     flux_base = hf_hub_download(
         repo_id="runcomfy/flux1-kontext-dev",
@@ -54,7 +53,7 @@ def download_models():
         cache_dir="/cache",
     )
     subprocess.run(f"ln -sf {flux_base} {os.path.join(diffusion_dir, 'flux1-kontext-dev.safetensors')}", shell=True, check=True)
-
+    
     # Download all recommended LoRAs (repo_id and filenames assumed or replaced with real ones)
     loras = {
         "time_tale.safetensors": ("some-user/time-tale-lora", "time_tale.safetensors"),
@@ -64,30 +63,50 @@ def download_models():
         "instagirl_wan_v2_3.safetensors": ("some-user/instagirl-wan-lora", "instagirl_wan_v2_3.safetensors"),
         "pulid_2.safetensors": ("some-user/pulid-2-lora", "pulid_2.safetensors"),
     }
-
+    
     for filename, (repo, file) in loras.items():
-        path = hf_hub_download(repo_id=repo, filename=file, cache_dir="/cache")
-        subprocess.run(f"ln -sf {path} {os.path.join(lora_dir, filename)}", shell=True, check=True)
+        try:
+            path = hf_hub_download(repo_id=repo, filename=file, cache_dir="/cache")
+            subprocess.run(f"ln -sf {path} {os.path.join(lora_dir, filename)}", shell=True, check=True)
+        except Exception as e:
+            print(f"Failed to download {filename}: {e}")
 
 # Decorate Modal app and function
 app = modal.App(name="comfyui-flux-kontext")
 
 @app.function(
-    gpu="A100",  # or whichever GPU you want, L40S/H100 if available
+    gpu="L40S",  # or whichever GPU you want, L40S/H100 if available
     timeout=600,
     volumes={"/cache": vol},
     container_idle_timeout=1800,
     image=image,
 )
-@modal.asgi()
 def comfyui_api():
     import subprocess
-    # Run ComfyUI, listen on all interfaces port 8000
-    subprocess.Popen(
-        "comfy launch -- --listen 0.0.0.0 --port 8000 --verbose",
-        shell=True,
+    import time
+    from fastapi import FastAPI
+    
+    # Download models first
+    download_models()
+    
+    # Start ComfyUI in the background
+    process = subprocess.Popen(
+        ["comfy", "launch", "--", "--listen", "0.0.0.0", "--port", "8000", "--verbose"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    # No return, ASGI app serves web UI
+    
+    # Wait a bit for ComfyUI to start
+    time.sleep(10)
+    
+    # Create a simple FastAPI app to proxy requests or provide status
+    app = FastAPI()
+    
+    @app.get("/health")
+    def health_check():
+        return {"status": "ComfyUI running", "port": 8000}
+    
+    return app
 
 @app.function(
     volumes={"/cache": vol},
@@ -100,4 +119,6 @@ def setup_and_download():
 # Entry for local debug or modal run
 if __name__ == "__main__":
     print("Starting download setup...")
-    setup_and_download()
+    with modal.running():
+        result = setup_and_download.remote()
+        print(result)
